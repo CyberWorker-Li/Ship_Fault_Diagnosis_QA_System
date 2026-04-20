@@ -157,6 +157,19 @@ _TRIVIAL_RELATIONS = {
     "是", "有", "为", "以", "将", "通过", "要求", "作为", "应提前", "将会受到", "另一方面",
 }
 
+_GENERIC_RELATIONS = {
+    "证据片段", "相关", "关联", "有关", "描述", "说明", "提到", "用于", "包含", "属于", "基于", "是", "有",
+}
+
+
+def _is_generic_relation_label(label: str) -> bool:
+    x = _normalize_label(label)
+    if not x:
+        return True
+    if x in _GENERIC_RELATIONS:
+        return True
+    return any(k in x for k in ["片段", "相关", "关联", "说明", "描述"]) and len(x) <= 6
+
 
 def _normalize_label(x: str) -> str:
     x = str(x or "").strip()
@@ -177,9 +190,13 @@ def _accept_edit(original_label: str, suggested_label: str) -> bool:
         return False
     if s in _TRIVIAL_RELATIONS:
         return False
-    if len(o) <= 8:
-        return False
-    if len(s) > len(o) - 2:
+
+    # 允许对“短但笼统”的原关系（如证据片段/相关/说明/是/有）直接采纳白名单建议
+    if _is_generic_relation_label(o):
+        return True
+
+    # 对非笼统原关系仍保持谨慎，避免过度替换
+    if len(o) >= 10 and len(s) > len(o) - 2:
         return False
     return True
 
@@ -206,7 +223,9 @@ def _select_edges(session, limit: int, min_support: int) -> List[EdgeRow]:
         "AND coalesce(r.status,'auto') <> 'rejected' "
         "AND coalesce(r['checked_by'],'') <> 'deepseek' "
         "WITH a, r, b, p, size(p) AS lp, "
-        "(CASE WHEN size(p) >= 16 THEN 30 WHEN size(p) >= 12 THEN 20 WHEN size(p) >= 9 THEN 10 ELSE 0 END "
+        "(CASE WHEN p = '证据片段' THEN 45 ELSE 0 END "
+        "+ CASE WHEN p IN ['相关','关联','有关','描述','说明','提到','用于','包含','属于','基于','是','有'] THEN 25 ELSE 0 END "
+        "+ CASE WHEN size(p) >= 16 THEN 30 WHEN size(p) >= 12 THEN 20 WHEN size(p) >= 9 THEN 10 ELSE 0 END "
         "+ CASE WHEN p STARTS WITH '将' THEN 5 ELSE 0 END "
         "+ CASE WHEN p CONTAINS '为例' OR p CONTAINS '例如' OR p CONTAINS '另一方面' OR p CONTAINS '给出' THEN 5 ELSE 0 END "
         "+ CASE WHEN p CONTAINS '\\n' OR p CONTAINS '\\r' THEN 10 ELSE 0 END) AS score "
@@ -257,8 +276,9 @@ def _mark_checked(session, rel_eid: str, verdict: str, confidence: float, reason
 def _build_prompt(edges: List[EdgeRow]) -> str:
     lines = []
     for i, e in enumerate(edges, 1):
+        vague = 1 if _is_generic_relation_label(e.p) else 0
         lines.append(
-            f"[{i}] ({e.s})-[:{e.p}]->({e.o}) | label_len={len(e.p)} | status={e.status} | support={e.support}"
+            f"[{i}] ({e.s})-[:{e.p}]->({e.o}) | label_len={len(e.p)} | vague={vague} | status={e.status} | support={e.support}"
         )
     return "\n".join(lines)
 
@@ -309,9 +329,10 @@ def main() -> None:
             "你是船舶故障诊断知识图谱审查专家。"
             "输入是一批三元组(主语,关系,宾语)。请判断每条是否合理、关系是否需要规范化、是否明显错误。"
             "关系优先规范到以下集合：发生于、涉及部件、导致、表现为、触发告警、适用工况、检测参数、诊断步骤、维修步骤、需要工具、更换备件、风险提示、前置条件、后续验证、来源案例、证据片段。"
+            "重点：若关系名笼统（如‘证据片段/相关/关联/说明/描述/是/有/用于/包含/属于’），优先给 verdict=edit 并提供 suggested_label。"
             "只输出JSON对象，格式: "
             "{\"items\":[{\"idx\":1,\"verdict\":\"keep|reject|edit\",\"confidence\":0.0-1.0,\"suggested_label\":\"...\",\"reason\":\"...\"}]}。"
-            "判定规则：不确定就keep；reject只用于明显错误/无意义/不可能关系；edit仅用于关系名过长或不规范。"
+            "判定规则：不确定就keep；reject只用于明显错误/无意义/不可能关系；笼统关系优先edit而非reject。"
         )
    
         total_checked = 0
@@ -426,12 +447,19 @@ def main() -> None:
 
                     original_p = to_send[idx - 1].p
                     rel_eid = to_send[idx - 1].rel_eid
+                    original_is_generic = _is_generic_relation_label(original_p)
+
+                    suggested_label = _normalize_label(suggested_label)
+                    if verdict in {"keep", "edit"} and original_is_generic and _accept_edit(original_p, suggested_label):
+                        verdict = "edit"
 
                     if verdict == "edit":
-                        suggested_label = _normalize_label(suggested_label)
                         if not _accept_edit(original_p, suggested_label):
                             verdict = "keep"
                             suggested_label = ""
+
+                    if verdict == "reject" and original_is_generic and _accept_edit(original_p, suggested_label):
+                        verdict = "edit"
 
                     apply_reject = bool(args.apply and verdict == "reject" and confidence >= float(args.auto_reject_threshold))
                     if args.apply:

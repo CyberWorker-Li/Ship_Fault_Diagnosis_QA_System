@@ -77,6 +77,42 @@ class KnowledgeGraphStore:
                 return v, False
         return "证据片段", True
 
+    def _specialize_relation(self, relation: str, subject: str, obj: str, s_type: str, o_type: str) -> tuple[str, bool]:
+        r = str(relation or "").strip() or "证据片段"
+        s = str(subject or "")
+        o = str(obj or "")
+        if r != "证据片段":
+            return r, False
+
+        if any(k in o for k in ["报警", "告警", "ERROR", "FAIL", "红灯"]):
+            return "触发告警", False
+        if o_type in {"检测参数"} or any(k in o for k in ["电阻", "压力", "电流", "油温", "容量", "间隙", "MPa", "MΩ", "℃"]):
+            return "检测参数", False
+        if o_type in {"诊断步骤"} or any(k in o for k in ["排查", "诊断", "测试", "测量", "检查"]):
+            return "诊断步骤", False
+        if o_type in {"维修步骤"} or any(k in o for k in ["清理", "更换", "调整", "检修", "维修", "浸泡", "涂抹"]):
+            return "维修步骤", False
+        if o_type in {"工具/备件"} or any(k in o for k in ["万用表", "兆欧表", "钳形电流表", "塞尺", "修理包", "工具", "备件"]):
+            return "需要工具", False
+        if o_type in {"工况/环境"} or any(k in o for k in ["工况", "高温", "潮湿", "振动", "停泊", "模式"]):
+            return "适用工况", False
+        if o_type in {"风险", "注意事项"} or any(k in o for k in ["风险", "爆炸", "失电", "严禁", "必须", "泄压", "挂牌"]):
+            return "风险提示", False
+        if o_type in {"案例"} or any(k in o for k in ["案例", "报告", "分析"]):
+            return "来源案例", False
+
+        if o_type == "零部件" and s_type in {"设备", "子系统"}:
+            return "涉及部件", False
+        if o_type in {"故障现象", "告警代码"} and s_type in {"设备", "子系统", "零部件"}:
+            return "表现为", False
+        if s_type == "故障原因" and o_type in {"故障现象", "告警代码"}:
+            return "导致", False
+
+        if any(k in s for k in ["老化", "卡滞", "堵塞", "虚接", "装反", "击穿", "故障"]) and any(k in o for k in ["报警", "跳闸", "停车", "失效", "不稳"]):
+            return "导致", False
+
+        return "证据片段", True
+
     def build_from_chunks(self, chunks: List[ChunkRecord], extractor: TripleExtractor, use_llm: bool = True):
         print(f"开始从 {len(chunks)} 个文本块中提取三元组...")
         rows = []
@@ -95,7 +131,10 @@ class KnowledgeGraphStore:
             for rec in records:
                 s = str(rec.get("subject", "")).strip()
                 o = str(rec.get("object", "")).strip()
+                s_type = str(rec.get("subject_type", "") or self._infer_entity_type(s))
+                o_type = str(rec.get("object_type", "") or self._infer_entity_type(o))
                 p, needs_review = self._normalize_relation(rec.get("predicate", ""))
+                p, needs_review = self._specialize_relation(p, s, o, s_type, o_type)
                 if not (s and p and o):
                     continue
                 triple_count += 1
@@ -105,8 +144,8 @@ class KnowledgeGraphStore:
                     evidence_key = f"{source_ref}::{chunk_id}::{s}::{p}::{o}"
                     rows.append({
                         "s": s, "p": p, "o": o,
-                        "s_type": str(rec.get("subject_type", "") or self._infer_entity_type(s)),
-                        "o_type": str(rec.get("object_type", "") or self._infer_entity_type(o)),
+                        "s_type": s_type,
+                        "o_type": o_type,
                         "source_ref": source_ref,
                         "chunk_id": chunk_id,
                         "confidence": max(0.0, min(1.0, conf)),
