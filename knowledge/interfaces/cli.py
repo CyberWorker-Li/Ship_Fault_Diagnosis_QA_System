@@ -2,6 +2,8 @@ import json
 import re
 import pickle
 import hashlib
+import shutil
+import time
 from pathlib import Path
 
 from ingestion.document_loader import load_course_documents
@@ -18,6 +20,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
 import jieba
 from knowledge.graph_store.graph_store import KnowledgeGraphStore
+
+
+SUPPORTED_UPLOAD_SUFFIXES = {".docx", ".pdf", ".txt"}
 
 
 def _calc_cache_key(settings: Settings, local_model_path: str) -> str:
@@ -145,6 +150,93 @@ def build_retriever_from_documents(settings: Settings) -> tuple[VectorRetriever,
         doc_count = len(docs)
 
     return retriever, bm25, chunk_records, doc_count, len(chunk_records)
+
+
+def ingest_new_files(
+    settings: Settings,
+    retriever: VectorRetriever,
+    bm25: BM25Okapi,
+    all_chunks: list[ChunkRecord],
+    graph_store: KnowledgeGraphStore | None = None,
+    extractor: TripleExtractor | None = None,
+    rebuild_graph: bool = True,
+) -> dict:
+    base_dir = Path(settings.data_dir)
+    new_dir = base_dir / "new"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    new_dir.mkdir(parents=True, exist_ok=True)
+
+    docs = load_course_documents(str(new_dir))
+    if not docs:
+        return {"moved": 0, "doc_count": len({Path(r.metadata.get("source", "")).name for r in all_chunks if r.metadata.get("source")}), "chunk_count": len(all_chunks), "graph_built": False, "bm25": bm25}
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        separators=["\n\n", "\n", "。", "！", "？", "，", "、", " "],
+    )
+
+    start_id = len(all_chunks) + 1
+    new_chunk_records: list[ChunkRecord] = []
+    for d in docs:
+        for part in text_splitter.split_text(d.text):
+            new_chunk_records.append(
+                ChunkRecord(
+                    chunk_id=f"doc-{start_id}",
+                    text=part,
+                    metadata={"source": d.source_file, "type": d.source_type},
+                )
+            )
+            start_id += 1
+
+    if not new_chunk_records:
+        return {"moved": 0, "doc_count": len({Path(r.metadata.get("source", "")).name for r in all_chunks if r.metadata.get("source")}), "chunk_count": len(all_chunks), "graph_built": False, "bm25": bm25}
+
+    retriever.indexer.add_chunks(new_chunk_records)
+    all_chunks.extend(new_chunk_records)
+
+    corpus = [rec.text for rec in all_chunks]
+    tokenized_corpus = [list(jieba.cut_for_search(doc)) for doc in corpus]
+    bm25_new = BM25Okapi(tokenized_corpus)
+
+    graph_built = False
+    if rebuild_graph and graph_store is not None and extractor is not None:
+        try:
+            graph_store.build_from_chunks(new_chunk_records, extractor, use_llm=True)
+            graph_built = True
+        except Exception:
+            graph_built = False
+
+    moved_files: list[str] = []
+    source_map = {str(Path(d.source_file)): d for d in docs}
+    for p in sorted(new_dir.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in SUPPORTED_UPLOAD_SUFFIXES:
+            continue
+        src = str(p.resolve())
+        if src not in source_map:
+            continue
+        target = base_dir / p.name
+        if target.exists():
+            target = base_dir / f"{p.stem}_{int(time.time())}{p.suffix}"
+        shutil.move(str(p), str(target))
+        moved_files.append(str(target))
+
+        old_src = source_map[src].source_file
+        for c in new_chunk_records:
+            if c.metadata.get("source") == old_src:
+                c.metadata["source"] = str(target)
+
+    cache_dir = Path(getattr(settings, "cache_dir", "")) if getattr(settings, "enable_index_cache", False) else None
+    if cache_dir is not None and cache_dir.exists():
+        for pat in ("chunks_*.pkl", "bm25_*.pkl", "vector_*.faiss", "vector_*.npy"):
+            for f in cache_dir.glob(pat):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+    doc_count = len({Path(r.metadata.get("source", "")).name for r in all_chunks if r.metadata.get("source")})
+    return {"moved": len(moved_files), "doc_count": doc_count, "chunk_count": len(all_chunks), "graph_built": graph_built, "bm25": bm25_new}
 
 
 def _tokenize_query(question: str) -> set[str]:

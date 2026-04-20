@@ -146,6 +146,70 @@ def search_edges(
     return out
 
 
+def fetch_subgraph_triples(
+    driver,
+    q: str = "",
+    hops: int = 1,
+    seed_limit: int = 8,
+    limit: int = 600,
+    exclude_rejected: bool = True,
+    min_support: int = 1,
+    min_confidence: float = 0.0,
+) -> List[Tuple[str, str, str]]:
+    q = str(q or "").strip()
+    k = max(1, min(3, int(hops or 1)))
+    where_parts = [
+        "coalesce(r.support,1) >= $min_support",
+        "coalesce(r.confidence,1.0) >= $min_confidence",
+    ]
+    if exclude_rejected:
+        where_parts.append("coalesce(r.status,'auto') <> 'rejected'")
+    where_clause = " AND ".join(where_parts)
+
+    if q:
+        cypher = (
+            "MATCH (s:Entity) WHERE s.name CONTAINS $q "
+            "WITH collect(s)[0..$seed_limit] AS seeds "
+            "UNWIND seeds AS seed "
+            f"MATCH p=(seed)-[:REL*1..{k}]-(n:Entity) "
+            "UNWIND nodes(p) AS x "
+            "WITH collect(DISTINCT x.name) AS node_names "
+            "MATCH (a:Entity)-[r:REL]->(b:Entity) "
+            f"WHERE a.name IN node_names AND b.name IN node_names AND {where_clause} "
+            "RETURN a.name AS s, r.label AS p, b.name AS o "
+            "ORDER BY coalesce(r.support,1) DESC, coalesce(r.confidence,0.0) DESC "
+            "LIMIT $limit"
+        )
+        params: Dict[str, Any] = {
+            "q": q,
+            "seed_limit": int(seed_limit),
+            "limit": int(limit),
+            "min_support": int(min_support),
+            "min_confidence": float(min_confidence),
+        }
+    else:
+        cypher = (
+            "MATCH (a:Entity)-[r:REL]->(b:Entity) "
+            f"WHERE {where_clause} "
+            "RETURN a.name AS s, r.label AS p, b.name AS o "
+            "ORDER BY coalesce(r.support,1) DESC, coalesce(r.confidence,0.0) DESC "
+            "LIMIT $limit"
+        )
+        params = {
+            "limit": int(limit),
+            "min_support": int(min_support),
+            "min_confidence": float(min_confidence),
+        }
+
+    out: List[Tuple[str, str, str]] = []
+    with driver.session() as session:
+        for r in session.run(cypher, **params):
+            s, p, o = str(r.get("s") or ""), str(r.get("p") or ""), str(r.get("o") or "")
+            if s and p and o:
+                out.append((s, p, o))
+    return out
+
+
 def approve_edge(driver, eid: str, note: str = "") -> None:
     eid = str(eid or "").strip()
     if not eid:
