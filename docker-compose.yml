@@ -1,0 +1,64 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: dockerfile
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    environment:
+      AI_ASSISTANT_DATA_DIR: "data"
+
+      AI_ASSISTANT_EMBEDDING_MODEL: "/app/models/bge-m3"
+      AI_ASSISTANT_RERANKER_MODEL: "/app/models/bge-reranker-base"
+      AI_ASSISTANT_LOCAL_FILES_ONLY: "true"
+
+      AI_ASSISTANT_LLM_BASE_URL: "http://host.docker.internal:11434/v1"
+      AI_ASSISTANT_LLM_API_KEY: "no-key"
+      AI_ASSISTANT_LLM_ANSWER_MODEL: "deepseek-r1:7b"
+      AI_ASSISTANT_LLM_RERANK_MODEL: "deepseek-r1:7b"
+
+      AI_ASSISTANT_ENABLE_NEO4J_GRAPH: "true"
+      AI_ASSISTANT_NEO4J_URI: "bolt://neo4j:7687"
+      AI_ASSISTANT_NEO4J_USER: "neo4j"
+      AI_ASSISTANT_NEO4J_PASSWORD: "${AI_ASSISTANT_NEO4J_PASSWORD}"
+      AI_ASSISTANT_NEO4J_DATABASE: "ship.fault.qa"
+      AI_ASSISTANT_NEO4J_CLEAR_ON_BUILD: "false"
+
+      AI_ASSISTANT_ENABLE_LLM_POLISH: "false"
+      AI_ASSISTANT_POLISH_BASE_URL: "https://api.deepseek.com/v1"
+      AI_ASSISTANT_POLISH_MODEL: "deepseek-chat"
+      AI_ASSISTANT_POLISH_API_KEY: "${AI_ASSISTANT_POLISH_API_KEY:-}"
+
+      AI_ASSISTANT_GRAPH_AUDIT_BASE_URL: "https://api.deepseek.com/v1"
+      AI_ASSISTANT_GRAPH_AUDIT_MODEL: "deepseek-chat"
+      AI_ASSISTANT_GRAPH_AUDIT_API_KEY: "${AI_ASSISTANT_GRAPH_AUDIT_API_KEY:-}"
+
+      AI_ASSISTANT_ENABLE_GRAPH_ON_START: "false"
+      AI_ASSISTANT_GRAPH_BUILD_MAX_CHUNKS: "0"
+
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  neo4j:
+    image: neo4j:5
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: "neo4j/${AI_ASSISTANT_NEO4J_PASSWORD}"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${AI_ASSISTANT_NEO4J_PASSWORD} 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  neo4j_data: {}
