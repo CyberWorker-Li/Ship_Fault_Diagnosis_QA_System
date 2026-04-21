@@ -11,7 +11,7 @@
 2. 技术路线 (Technical Stack)
 ----------------------------
 * 核心框架: LangChain（流程编排、文本切分、LLM 调用）
-* 本地语言模型(LLM): Llama 3.1 via Ollama（建议使用 llama3.1:8b，质量较 q2 更稳定）
+* 本地语言模型(LLM): DeepSeek-R1 7B via Ollama（当前默认 `deepseek-r1:7b`）
 * 文本向量化(Embedding): BAAI/bge-m3（本地加载，多语言/长文本）
 * 重排模型(Reranker): BAAI/bge-reranker-base（本地 cross-encoder 精排）
 * 关键词检索: Rank-BM25 + Jieba
@@ -62,9 +62,15 @@ B. 问答阶段 (Query Process)
    pip install langchain langchain-openai langchain-text-splitters
    pip install sentence-transformers faiss-cpu rank-bm25 jieba networkx requests neo4j
 2) 启动本地 Ollama，并拉取模型
-   ollama pull llama3.1:8b
-3) 将课程文档放入 AI_Assistant/data（.docx/.pdf/.txt）
-4) 启动
+   ollama pull deepseek-r1:7b
+3) 模型准备（重要）
+   - 本项目 `models/` 目录体积较大，通常不提交到代码仓库/网盘。
+   - 请在本机准备以下目录（可从原项目机器拷贝）：
+     - `models/bge-m3`
+     - `models/bge-reranker-base`
+   - 若未拷贝，可按需从 HuggingFace 下载同名模型到本地目录。
+4) 将课程文档放入 AI_Assistant/data（.docx/.pdf/.txt）
+5) 启动
    双击 AI_Assistant/run.bat
 
 6. run.bat 启动脚本说明
@@ -73,14 +79,13 @@ run.bat 作用:
 - 自动定位 AI_Assistant 目录并设置 PYTHONPATH
 - 检查 Python 与 Ollama 服务是否可用
 - 通过环境变量注入所有运行时开关（LLM/检索/图谱/Neo4j/润色等）
-- 支持三种启动模式:
-  - CLI: python -m knowledge.interfaces.cli
-  - UI:  python -m streamlit run ui\app.py
-  - ALL: 同时启动 CLI + UI
+- 当前固定 UI 启动模式（CLI/ALL 入口已禁用）:
+  - UI: python -m streamlit run ui\app.py
+  - 传入 `cli` 或 `all` 参数时会自动提示并回退到 UI 模式
 
 用法:
-- 双击 run.bat：交互选择 1=CLI / 2=UI / 3=ALL（默认 ALL）
-- 命令行参数：run.bat cli | run.bat ui | run.bat all
+- 双击 run.bat：直接启动 UI
+- 命令行参数：可传 `cli`/`all`，但会被脚本提示并自动切换为 UI
 
 UI 说明（Streamlit）:
 - 问答：聊天式对话（支持多轮追问），可按需展开证据/Prompt/调试信息
@@ -112,6 +117,7 @@ UI 说明（Streamlit）:
 
 安全提醒:
 - 不建议把 DeepSeek API Key 明文提交到仓库；如团队协作必须写入 run.bat，请使用可随时轮换的低权限 key。
+- 不建议提交 `models/`、`data/`、`.cache/` 等大文件目录，建议由部署文档指引本地准备。
 
 7. 关键配置说明 (Configuration)
 ------------------------------
@@ -128,7 +134,7 @@ UI 说明（Streamlit）:
   AI_ASSISTANT_CHUNK_OVERLAP（默认200）
 - LLM(Ollama):
   AI_ASSISTANT_LLM_BASE_URL（默认 http://localhost:11434/v1）
-  AI_ASSISTANT_LLM_ANSWER_MODEL（建议 llama3.1:8b）
+  AI_ASSISTANT_LLM_ANSWER_MODEL（当前默认 deepseek-r1:7b）
   AI_ASSISTANT_ENABLE_LLM_REWRITE / AI_ASSISTANT_ENABLE_LLM_RERANK
 - DeepSeek 润色:
   AI_ASSISTANT_ENABLE_LLM_POLISH
@@ -192,7 +198,32 @@ UI 说明（Streamlit）:
 - Ollama 500 runner stopped：资源不足导致，降低建图块数或换更轻量模型进行抽取。
 - Docker build 过程中出现 failed to receive status / EOF：常见于 Docker Desktop 引擎崩溃或网络抖动，建议重启 Docker Desktop、执行 wsl --shutdown 后重试。
 
-11. 日常运维建议（非 Docker）
+11. 大模型目录过大时的配置与指导
+-------------------------------
+1) 为什么不上传 `models/`
+- `models/` 体积通常较大（数 GB~数十 GB），会导致代码托管平台、网盘或邮件传输失败。
+- 推荐做法：代码与配置单独上传，模型目录通过“离线拷贝”或“首次部署下载”方式准备。
+
+2) 非 Docker 环境（run.bat）如何配置
+- 在 `run.bat` 保持或修改为本地路径：
+  - `set AI_ASSISTANT_EMBEDDING_MODEL=%PROJECT_ROOT%models\bge-m3`
+  - `set AI_ASSISTANT_RERANKER_MODEL=%PROJECT_ROOT%models\bge-reranker-base`
+- 若模型放在其他盘符（如 `D:\models`），可改为绝对路径。
+
+3) Docker 环境如何配置（若使用）
+- `docker-compose.yml` 通过卷挂载本地模型目录：
+  - `./models:/app/models`
+- 容器内环境变量应指向：
+  - `AI_ASSISTANT_EMBEDDING_MODEL=/app/models/bge-m3`
+  - `AI_ASSISTANT_RERANKER_MODEL=/app/models/bge-reranker-base`
+
+4) 新机器迁移最小步骤
+- 步骤1：先拉取代码（不含 models/data）
+- 步骤2：拷贝 `models/bge-m3` 与 `models/bge-reranker-base`
+- 步骤3：准备 `data/` 文档
+- 步骤4：运行 `run.bat` 验证启动
+
+12. 日常运维建议（非 Docker）
 --------------------------
 1) 日常模式（推荐）:
 - set AI_ASSISTANT_ENABLE_GRAPH_ON_START=false
@@ -206,4 +237,5 @@ UI 说明（Streamlit）:
 3) AI助审配置优先级:
 - 优先读取 AI_ASSISTANT_GRAPH_AUDIT_BASE_URL / MODEL / API_KEY
 - 未配置时回退到 POLISH 或 LLM 配置。
+
 
